@@ -1,0 +1,38 @@
+name: Crypto Signals Scanner
+
+on:
+  schedule:
+    - cron: '*/15 * * * *'  # كل 15 دقيقة
+  workflow_dispatch:          # تشغيل يدوي من GitHub (للاختبار)
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write         # لحفظ sent_signals.json في الريبو
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run scanner
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+        run: python telegram_scanner.py
+
+      - name: Save sent signals (prevent duplicates)
+        if: always()
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add sent_signals.json || true
+          git diff --staged --quiet || git commit -m "update sent signals [skip ci]"
+          git push || true
