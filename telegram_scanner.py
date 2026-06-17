@@ -1,15 +1,15 @@
 """
-telegram_scanner.py — اللبنة 2+3: مسح + إرسال + منع التكرار
+telegram_scanner.py — Block 2+3: Scan + Send + Deduplication
 =============================================================
-يمسح العملات، يلتقط إشارات آخر شمعة (آخر 15 دقيقة)،
-يرسل كل إشارة جديدة لـ Telegram، ويتذكر ما أرسله لتجنّب التكرار.
+Scans symbols, captures signals from the last candle (last 45 minutes),
+sends each new signal to Telegram, and remembers what was sent to avoid duplicates.
 
-مفتاح الإشارة الفريد: رمز العملة + الاتجاه + وقت الشمعة
-الذاكرة: sent_signals.json في مجلد المشروع
+Unique signal key: symbol + direction + candle timestamp
+Memory: sent_signals.json in the project folder
 
-الأمان: التوكن من متغيّر بيئة TELEGRAM_TOKEN.
+Security: token is read from the TELEGRAM_TOKEN environment variable.
 
-التشغيل:
+Usage:
   python telegram_scanner.py
 """
 
@@ -31,15 +31,15 @@ CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "8589721199")
 
 TF             = "15m"
 DAYS           = 3
-MAX_CANDLE_AGE = 15     # دقيقة — آخر شمعة فقط
+MAX_CANDLE_AGE = 45     # minutes — signals within the last 45 minutes only
 SENT_FILE      = Path(__file__).parent / "sent_signals.json"
-MAX_MEMORY     = 500    # أقصى عدد إشارات نحتفظ بها في الذاكرة (لتجنب تضخّم الملف)
+MAX_MEMORY     = 500    # max signals to keep in memory (prevents file bloat)
 
 
-# ─── الذاكرة ────────────────────────────────────────────────────────────────
+# ─── Memory ─────────────────────────────────────────────────────────────────
 
 def load_sent():
-    """يقرأ الإشارات المُرسَلة سابقاً من الملف."""
+    """Load previously sent signals from file."""
     if not SENT_FILE.exists():
         return set()
     try:
@@ -50,18 +50,18 @@ def load_sent():
 
 
 def save_sent(sent_set):
-    """يحفظ الإشارات المُرسَلة — يحتفظ بآخر MAX_MEMORY فقط."""
+    """Save sent signals — keeps only the last MAX_MEMORY entries."""
     items = list(sent_set)[-MAX_MEMORY:]
     SENT_FILE.write_text(json.dumps(items, ensure_ascii=False, indent=2),
                          encoding="utf-8")
 
 
 def signal_key(symbol, direction, ts):
-    """مفتاح فريد لكل إشارة: عملة + اتجاه + وقت الشمعة."""
+    """Unique key for each signal: symbol + direction + candle timestamp."""
     return f"{symbol}|{direction}|{ts.strftime('%Y%m%d%H%M')}"
 
 
-# ─── الإرسال ────────────────────────────────────────────────────────────────
+# ─── Sending ─────────────────────────────────────────────────────────────────
 
 def send_message(text):
     if not TOKEN:
@@ -101,7 +101,7 @@ def format_signal(symbol, sig, ts):
     )
 
 
-# ─── المسح ──────────────────────────────────────────────────────────────────
+# ─── Scanning ────────────────────────────────────────────────────────────────
 
 def scan():
     now     = datetime.now(timezone.utc)
@@ -126,14 +126,14 @@ def scan():
     return found
 
 
-# ─── الرئيسي ────────────────────────────────────────────────────────────────
+# ─── Main ────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     signals  = scan()
     sent_set = load_sent()
 
     if not signals:
-        print("No new signals in the last 15 minutes.")
+        print("No new signals in the last 45 minutes.")
         sys.exit(0)
 
     new_count = sent_count = skipped = 0
