@@ -85,6 +85,15 @@ def send_message(text):
         return False
 
 
+def fmt_price(price: float) -> str:
+    if price >= 1:
+        return f"{price:,.4f}"
+    elif price >= 0.01:
+        return f"{price:.6f}"
+    else:
+        return f"{price:.8f}"
+
+
 def format_signal(symbol, sig, ts):
     direction = "LONG  🟢" if sig["direction"] == "long" else "SHORT 🔴"
     return (
@@ -92,10 +101,10 @@ def format_signal(symbol, sig, ts):
         f"\n"
         f"Symbol:    <b>{symbol}</b>\n"
         f"Direction: <b>{direction}</b>\n"
-        f"Entry:     {sig['entry']:,.2f}\n"
-        f"Stop:      {sig['stop']:,.2f}\n"
-        f"Target 1:  {sig['target1']:,.2f}\n"
-        f"Target 2:  {sig['target2']:,.2f}\n"
+        f"Entry:     {fmt_price(sig['entry'])}\n"
+        f"Stop:      {fmt_price(sig['stop'])}\n"
+        f"Target 1:  {fmt_price(sig['target1'])}\n"
+        f"Target 2:  {fmt_price(sig['target2'])}\n"
         f"RSI:       {sig['rsi']}\n"
         f"Time:      {ts.strftime('%Y-%m-%d %H:%M UTC')}"
     )
