@@ -23,6 +23,11 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      - name: Restore sent signals
+        run: |
+          git fetch origin main
+          git checkout origin/main -- sent_signals.json || echo "No sent_signals.json yet"
+
       - name: Run scanner
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
