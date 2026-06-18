@@ -1,15 +1,16 @@
 """
-telegram_scanner.py — اللبنة 2+3: مسح + إرسال + منع التكرار
-=============================================================
-يمسح العملات، يلتقط إشارات آخر شمعة (آخر 15 دقيقة)،
-يرسل كل إشارة جديدة لـ Telegram، ويتذكر ما أرسله لتجنّب التكرار.
+telegram_scanner.py — Block 2+3: Scan + Send + Deduplication + OKX Execution
+==============================================================================
+Scans symbols, captures signals from the last 180 minutes,
+sends each new signal to Telegram, optionally executes on OKX Demo,
+and remembers what was sent to avoid duplicates.
 
-مفتاح الإشارة الفريد: رمز العملة + الاتجاه + وقت الشمعة
-الذاكرة: sent_signals.json في مجلد المشروع
+Unique signal key: symbol + direction + candle timestamp
+Memory: sent_signals.json in the project folder
 
-الأمان: التوكن من متغيّر بيئة TELEGRAM_TOKEN.
+Security: all keys read from environment variables only.
 
-التشغيل:
+Usage:
   python telegram_scanner.py
 """
 
@@ -26,20 +27,29 @@ sys.path.insert(0, str(Path(__file__).parent))
 from data.fetcher import fetch_ohlcv, TOP_20
 from patterns.detector import detect_rsi_divergence
 
+# ─── Config ──────────────────────────────────────────────────────────────────
+
 TOKEN   = os.environ.get("TELEGRAM_TOKEN")
 CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "8589721199")
 
 TF             = "15m"
 DAYS           = 3
-MAX_CANDLE_AGE = 15     # دقيقة — آخر شمعة فقط
+MAX_CANDLE_AGE = 180    # minutes — scan signals within this window
 SENT_FILE      = Path(__file__).parent / "sent_signals.json"
-MAX_MEMORY     = 500    # أقصى عدد إشارات نحتفظ بها في الذاكرة (لتجنب تضخّم الملف)
+MAX_MEMORY     = 500    # max signals to keep in memory (prevents file bloat)
+
+# OKX execution — enabled only when all three keys are present
+OKX_ENABLED = all([
+    os.environ.get("OKX_API_KEY"),
+    os.environ.get("OKX_SECRET_KEY"),
+    os.environ.get("OKX_PASSPHRASE"),
+])
 
 
-# ─── الذاكرة ────────────────────────────────────────────────────────────────
+# ─── Memory ──────────────────────────────────────────────────────────────────
 
 def load_sent():
-    """يقرأ الإشارات المُرسَلة سابقاً من الملف."""
+    """Load previously sent signals from file."""
     if not SENT_FILE.exists():
         return set()
     try:
@@ -50,18 +60,46 @@ def load_sent():
 
 
 def save_sent(sent_set):
-    """يحفظ الإشارات المُرسَلة — يحتفظ بآخر MAX_MEMORY فقط."""
+    """Save sent signals — keeps only the last MAX_MEMORY entries."""
     items = list(sent_set)[-MAX_MEMORY:]
     SENT_FILE.write_text(json.dumps(items, ensure_ascii=False, indent=2),
                          encoding="utf-8")
 
 
 def signal_key(symbol, direction, ts):
-    """مفتاح فريد لكل إشارة: عملة + اتجاه + وقت الشمعة."""
+    """Unique key for each signal: symbol + direction + candle timestamp."""
     return f"{symbol}|{direction}|{ts.strftime('%Y%m%d%H%M')}"
 
 
-# ─── الإرسال ────────────────────────────────────────────────────────────────
+# ─── Formatting ──────────────────────────────────────────────────────────────
+
+def fmt_price(price: float) -> str:
+    """Smart price formatter — shows enough decimal places for the magnitude."""
+    if price >= 1:
+        return f"{price:,.4f}"
+    elif price >= 0.01:
+        return f"{price:.6f}"
+    else:
+        return f"{price:.8f}"
+
+
+def format_signal(symbol, sig, ts):
+    direction = "LONG  🟢" if sig["direction"] == "long" else "SHORT 🔴"
+    return (
+        f"🔔 <b>New Signal — RSI Divergence</b>\n"
+        f"\n"
+        f"Symbol:    <b>{symbol}</b>\n"
+        f"Direction: <b>{direction}</b>\n"
+        f"Entry:     {fmt_price(sig['entry'])}\n"
+        f"Stop:      {fmt_price(sig['stop'])}\n"
+        f"Target 1:  {fmt_price(sig['target1'])}\n"
+        f"Target 2:  {fmt_price(sig['target2'])}\n"
+        f"RSI:       {sig['rsi']}\n"
+        f"Time:      {ts.strftime('%Y-%m-%d %H:%M UTC')}"
+    )
+
+
+# ─── Telegram ────────────────────────────────────────────────────────────────
 
 def send_message(text):
     if not TOKEN:
@@ -85,28 +123,33 @@ def send_message(text):
         return False
 
 
-def format_signal(symbol, sig, ts):
-    direction = "LONG  🟢" if sig["direction"] == "long" else "SHORT 🔴"
-    return (
-        f"🔔 <b>New Signal — RSI Divergence</b>\n"
-        f"\n"
-        f"Symbol:    <b>{symbol}</b>\n"
-        f"Direction: <b>{direction}</b>\n"
-        f"Entry:     {sig['entry']:,.2f}\n"
-        f"Stop:      {sig['stop']:,.2f}\n"
-        f"Target 1:  {sig['target1']:,.2f}\n"
-        f"Target 2:  {sig['target2']:,.2f}\n"
-        f"RSI:       {sig['rsi']}\n"
-        f"Time:      {ts.strftime('%Y-%m-%d %H:%M UTC')}"
-    )
+# ─── OKX Execution ───────────────────────────────────────────────────────────
+
+def maybe_execute(symbol, sig):
+    """Fire-and-forget OKX execution. Skips silently if not enabled."""
+    if not OKX_ENABLED:
+        return
+    try:
+        from okx_executor import execute_signal
+        execute_signal({
+            "symbol":    symbol,
+            "direction": sig["direction"],
+            "entry":     sig["entry"],
+            "stop":      sig["stop"],
+            "target1":   sig["target1"],
+            "target2":   sig.get("target2", 0),
+            "rsi":       sig.get("rsi", 0),
+        })
+    except Exception as e:
+        print(f"  OKX execution error: {e}")
 
 
-# ─── المسح ──────────────────────────────────────────────────────────────────
+# ─── Scanning ────────────────────────────────────────────────────────────────
 
 def scan():
-    now     = datetime.now(timezone.utc)
-    cutoff  = now - timedelta(minutes=MAX_CANDLE_AGE)
-    found   = []
+    now    = datetime.now(timezone.utc)
+    cutoff = now - timedelta(minutes=MAX_CANDLE_AGE)
+    found  = []
 
     print(f"Scanning {len(TOP_20)} symbols at {now.strftime('%H:%M UTC')}...")
     for symbol in TOP_20:
@@ -126,17 +169,22 @@ def scan():
     return found
 
 
-# ─── الرئيسي ────────────────────────────────────────────────────────────────
+# ─── Main ────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     signals  = scan()
     sent_set = load_sent()
 
     if not signals:
-        print("No new signals in the last 15 minutes.")
+        print(f"No new signals in the last {MAX_CANDLE_AGE} minutes.")
         sys.exit(0)
 
-    new_count = sent_count = skipped = 0
+    if OKX_ENABLED:
+        print("OKX execution: ENABLED")
+    else:
+        print("OKX execution: disabled (keys not set)")
+
+    sent_count = skipped = 0
 
     for symbol, sig, ts in signals:
         key = signal_key(symbol, sig["direction"], ts)
@@ -152,11 +200,10 @@ if __name__ == "__main__":
         if ok:
             sent_set.add(key)
             sent_count += 1
-            print(f"  + {symbol} {sig['direction']} @ {sig['entry']:.2f} — sent.")
+            print(f"  + {symbol} {sig['direction']} @ {fmt_price(sig['entry'])} — sent.")
+            maybe_execute(symbol, sig)
         else:
             print(f"  ! {symbol} {sig['direction']} — send failed.")
-
-        new_count += 1
 
     save_sent(sent_set)
 
