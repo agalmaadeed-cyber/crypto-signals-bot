@@ -1,7 +1,7 @@
 """
 telegram_scanner.py — Block 2+3: Scan + Send + Deduplication
 =============================================================
-Scans symbols, captures signals from the last candle (last 45 minutes),
+Scans symbols, captures signals from the last candle (last 180 minutes),
 sends each new signal to Telegram, and remembers what was sent to avoid duplicates.
 
 Unique signal key: symbol + direction + candle timestamp
@@ -31,7 +31,7 @@ CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "8589721199")
 
 TF             = "15m"
 DAYS           = 3
-MAX_CANDLE_AGE = 45     # minutes — signals within the last 45 minutes only
+MAX_CANDLE_AGE = 180     # minutes — signals within the last 180 minutes only
 SENT_FILE      = Path(__file__).parent / "sent_signals.json"
 MAX_MEMORY     = 500    # max signals to keep in memory (prevents file bloat)
 
