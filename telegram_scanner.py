@@ -1,15 +1,15 @@
 """
-telegram_scanner.py — Block 2+3: Scan + Send + Deduplication
+telegram_scanner.py — اللبنة 2+3: مسح + إرسال + منع التكرار
 =============================================================
-Scans symbols, captures signals from the last candle (last 180 minutes),
-sends each new signal to Telegram, and remembers what was sent to avoid duplicates.
+يمسح العملات، يلتقط إشارات آخر شمعة (آخر 15 دقيقة)،
+يرسل كل إشارة جديدة لـ Telegram، ويتذكر ما أرسله لتجنّب التكرار.
 
-Unique signal key: symbol + direction + candle timestamp
-Memory: sent_signals.json in the project folder
+مفتاح الإشارة الفريد: رمز العملة + الاتجاه + وقت الشمعة
+الذاكرة: sent_signals.json في مجلد المشروع
 
-Security: token is read from the TELEGRAM_TOKEN environment variable.
+الأمان: التوكن من متغيّر بيئة TELEGRAM_TOKEN.
 
-Usage:
+التشغيل:
   python telegram_scanner.py
 """
 
@@ -31,15 +31,15 @@ CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "8589721199")
 
 TF             = "15m"
 DAYS           = 3
-MAX_CANDLE_AGE = 180     # minutes — signals within the last 180 minutes only
+MAX_CANDLE_AGE = 15     # دقيقة — آخر شمعة فقط
 SENT_FILE      = Path(__file__).parent / "sent_signals.json"
-MAX_MEMORY     = 500    # max signals to keep in memory (prevents file bloat)
+MAX_MEMORY     = 500    # أقصى عدد إشارات نحتفظ بها في الذاكرة (لتجنب تضخّم الملف)
 
 
-# ─── Memory ─────────────────────────────────────────────────────────────────
+# ─── الذاكرة ────────────────────────────────────────────────────────────────
 
 def load_sent():
-    """Load previously sent signals from file."""
+    """يقرأ الإشارات المُرسَلة سابقاً من الملف."""
     if not SENT_FILE.exists():
         return set()
     try:
@@ -50,18 +50,18 @@ def load_sent():
 
 
 def save_sent(sent_set):
-    """Save sent signals — keeps only the last MAX_MEMORY entries."""
+    """يحفظ الإشارات المُرسَلة — يحتفظ بآخر MAX_MEMORY فقط."""
     items = list(sent_set)[-MAX_MEMORY:]
     SENT_FILE.write_text(json.dumps(items, ensure_ascii=False, indent=2),
                          encoding="utf-8")
 
 
 def signal_key(symbol, direction, ts):
-    """Unique key for each signal: symbol + direction + candle timestamp."""
+    """مفتاح فريد لكل إشارة: عملة + اتجاه + وقت الشمعة."""
     return f"{symbol}|{direction}|{ts.strftime('%Y%m%d%H%M')}"
 
 
-# ─── Sending ─────────────────────────────────────────────────────────────────
+# ─── الإرسال ────────────────────────────────────────────────────────────────
 
 def send_message(text):
     if not TOKEN:
@@ -85,15 +85,6 @@ def send_message(text):
         return False
 
 
-def fmt_price(price: float) -> str:
-    if price >= 1:
-        return f"{price:,.4f}"
-    elif price >= 0.01:
-        return f"{price:.6f}"
-    else:
-        return f"{price:.8f}"
-
-
 def format_signal(symbol, sig, ts):
     direction = "LONG  🟢" if sig["direction"] == "long" else "SHORT 🔴"
     return (
@@ -101,16 +92,16 @@ def format_signal(symbol, sig, ts):
         f"\n"
         f"Symbol:    <b>{symbol}</b>\n"
         f"Direction: <b>{direction}</b>\n"
-        f"Entry:     {fmt_price(sig['entry'])}\n"
-        f"Stop:      {fmt_price(sig['stop'])}\n"
-        f"Target 1:  {fmt_price(sig['target1'])}\n"
-        f"Target 2:  {fmt_price(sig['target2'])}\n"
+        f"Entry:     {sig['entry']:,.2f}\n"
+        f"Stop:      {sig['stop']:,.2f}\n"
+        f"Target 1:  {sig['target1']:,.2f}\n"
+        f"Target 2:  {sig['target2']:,.2f}\n"
         f"RSI:       {sig['rsi']}\n"
         f"Time:      {ts.strftime('%Y-%m-%d %H:%M UTC')}"
     )
 
 
-# ─── Scanning ────────────────────────────────────────────────────────────────
+# ─── المسح ──────────────────────────────────────────────────────────────────
 
 def scan():
     now     = datetime.now(timezone.utc)
@@ -135,14 +126,14 @@ def scan():
     return found
 
 
-# ─── Main ────────────────────────────────────────────────────────────────────
+# ─── الرئيسي ────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     signals  = scan()
     sent_set = load_sent()
 
     if not signals:
-        print("No new signals in the last 45 minutes.")
+        print("No new signals in the last 15 minutes.")
         sys.exit(0)
 
     new_count = sent_count = skipped = 0
