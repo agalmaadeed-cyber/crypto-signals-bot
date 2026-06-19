@@ -177,11 +177,12 @@ def get_pos_mode(exchange):
 
 def open_position(exchange, symbol, direction, amount, pos_mode):
     """يفتح مركز Futures."""
-    order_side = "buy" if direction == "long" else "sell"
-    params     = {"posSide": direction} if pos_mode == "hedge" else {}
+    swap_symbol = symbol.replace("/", "-") + "-SWAP"
+    order_side  = "buy" if direction == "long" else "sell"
+    params      = {"posSide": direction} if pos_mode == "hedge" else {}
     try:
         order = exchange.create_order(
-            symbol=symbol, type="market",
+            symbol=swap_symbol, type="market",
             side=order_side, amount=amount, params=params
         )
         return order
@@ -192,11 +193,12 @@ def open_position(exchange, symbol, direction, amount, pos_mode):
 
 def close_position(exchange, symbol, direction, amount, pos_mode):
     """يغلق مركز Futures."""
-    close_side = "sell" if direction == "long" else "buy"
-    params     = {"posSide": direction} if pos_mode == "hedge" else {}
+    swap_symbol = symbol.replace("/", "-") + "-SWAP"
+    close_side  = "sell" if direction == "long" else "buy"
+    params      = {"posSide": direction} if pos_mode == "hedge" else {}
     try:
         exchange.create_order(
-            symbol=symbol, type="market",
+            symbol=swap_symbol, type="market",
             side=close_side, amount=amount, params=params
         )
         return True
