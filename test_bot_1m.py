@@ -33,6 +33,12 @@ import urllib.parse
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
 
+# Force unbuffered, line-flushed stdout so live progress is visible
+# regardless of how this script is launched (background task, redirected
+# to a file, etc). Without this, output can sit invisible in a buffer
+# until the process exits.
+sys.stdout.reconfigure(line_buffering=True)
+
 sys.path.insert(0, str(Path(__file__).parent))
 
 # ─── Import REAL production modules — do not redefine detection logic ───────
@@ -84,6 +90,32 @@ def assert_isolated_from_production():
             print(f"FATAL: state file collision with production file {f}. Aborting.")
             sys.exit(1)
     print("OK: isolated from production state files (sent_signals.json, open_positions.json).")
+
+
+LOCK_FILE = STATE_DIR / "test_bot_1m.lock"
+
+
+def acquire_lock_or_exit():
+    """
+    Refuse to start a second instance. This script's concurrency cap only
+    works correctly with a single writer to open_positions_test1m.json —
+    two instances racing each other can both pass the cap check before
+    either has saved its position, silently exceeding the cap.
+    """
+    if LOCK_FILE.exists():
+        try:
+            old_pid = int(LOCK_FILE.read_text().strip())
+        except Exception:
+            old_pid = None
+        print(f"FATAL: lock file exists ({LOCK_FILE.name}, pid={old_pid}).")
+        print("Another instance may already be running. If you're sure it is not,")
+        print(f"delete {LOCK_FILE} manually and re-run.")
+        sys.exit(1)
+    LOCK_FILE.write_text(str(os.getpid()))
+
+
+def release_lock():
+    LOCK_FILE.unlink(missing_ok=True)
 
 
 # ─── State (isolated) ─────────────────────────────────────────────────────────
@@ -152,14 +184,19 @@ def count_open_positions():
     return len(load_positions())
 
 
+DETECTION_WINDOW_MINUTES = 10  # widened from 1 to avoid missing signals if a
+                                 # cycle is delayed (cycles have drifted 60-150s
+                                 # in practice, not exactly 60s every time)
+
+
 def scan_one_cycle(symbols):
-    """Scan all symbols on 1m for signals in the last 1 minute (the freshest candle)."""
+    """Scan all symbols on 1m for signals in the last DETECTION_WINDOW_MINUTES."""
     now    = datetime.now(timezone.utc)
-    cutoff = now - timedelta(minutes=1)
+    cutoff = now - timedelta(minutes=DETECTION_WINDOW_MINUTES)
     found  = []
     for symbol in symbols:
         try:
-            df = fetch_ohlcv(symbol, TF, days=DAYS)
+            df = fetch_ohlcv(symbol, TF, days=DAYS, use_cache=False)
             if df.empty or len(df) < 60:
                 continue
             signals = detect_rsi_divergence(df)
@@ -246,6 +283,7 @@ if __name__ == "__main__":
     args = ap.parse_args()
 
     assert_isolated_from_production()
+    acquire_lock_or_exit()
 
     print("=" * 60)
     print("  TEST BOT — 1m timeframe, REAL detection logic")
@@ -264,6 +302,8 @@ if __name__ == "__main__":
                 time.sleep(args.interval)
     except KeyboardInterrupt:
         print("\nStopped manually.")
+    finally:
+        release_lock()
 
     print("\n" + "=" * 60)
     print("  RUN SUMMARY")
