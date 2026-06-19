@@ -92,9 +92,9 @@ def _fetch_yahoo(symbol, timeframe, days):
     df.index = pd.to_datetime(df.index, utc=True)
     return df[~df.index.duplicated()].sort_index()
 
-def fetch_ohlcv(symbol: str, timeframe: str, days: int = 90) -> pd.DataFrame:
+def fetch_ohlcv(symbol: str, timeframe: str, days: int = 90, use_cache: bool = True) -> pd.DataFrame:
     cache_file = CACHE_DIR / f"{symbol.replace('/','_')}_{timeframe}.parquet"
-    if cache_file.exists():
+    if use_cache and cache_file.exists():
         if (time.time() - cache_file.stat().st_mtime) / 3600 < 1:
             try:
                 return pd.read_parquet(cache_file)
