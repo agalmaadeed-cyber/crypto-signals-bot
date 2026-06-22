@@ -1,0 +1,55 @@
+# test_1m_scanner.yml
+# Fires every minute to validate GitHub Actions scheduler reliability.
+# Each run = one scan cycle. State persisted via committed JSON files.
+# Remove or disable this workflow once scheduler reliability is confirmed.
+
+name: Test 1m Scanner
+
+on:
+  schedule:
+    - cron: '* * * * *'   # every minute
+  workflow_dispatch:        # manual trigger for immediate testing
+
+concurrency:
+  group: test-1m-scanner
+  cancel-in-progress: false  # never cancel a running scan, queue instead
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write        # needed to commit state files back
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Restore test state files
+        run: |
+          git fetch origin main
+          git checkout origin/main -- sent_signals_test1m.json || echo "No sent_signals_test1m.json yet"
+          git checkout origin/main -- open_positions_test1m.json || echo "No open_positions_test1m.json yet"
+
+      - name: Run single cycle
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          OKX_API_KEY:    ${{ secrets.OKX_API_KEY }}
+          OKX_SECRET_KEY: ${{ secrets.OKX_SECRET_KEY }}
+          OKX_PASSPHRASE: ${{ secrets.OKX_PASSPHRASE }}
+        run: python test_bot_1m.py
+
+      - name: Save test state files
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add sent_signals_test1m.json open_positions_test1m.json || true
+          git diff --staged --quiet || git commit -m "update test1m state [skip ci]"
+          git push || true

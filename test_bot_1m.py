@@ -1,137 +1,88 @@
 """
-test_bot_1m.py — Infrastructure stress test using REAL strategy logic on 1m candles
-=====================================================================================
-PURPOSE: This is NOT a profitability test. It validates that the full pipeline
-(detect -> cap -> execute -> notify -> track -> close) works reliably under
-HIGH FREQUENCY conditions, using the exact same detect_rsi_divergence() function
-the production 15m system uses — only the timeframe changes.
+test_bot_1m.py — Single-cycle 1m test bot for GitHub Actions scheduler validation
+===================================================================================
+PURPOSE: Validate that GitHub Actions fires reliably every minute by running ONE
+cycle per invocation. GitHub itself is the scheduler — no internal loop or sleep.
 
-WHY THIS EXISTS: On 2026-06-18/19, GitHub Actions' scheduler went silent for
-hours, then fired all at once and opened 8 concurrent positions with zero
-concurrency cap. This script proves the pipeline behaves correctly (caps at
-MAX_CONCURRENT, executes cleanly, closes cleanly) before we trust it with a
-more reliable scheduler.
+DIFFERENCES from the local multi-cycle version:
+  - No --cycles / --interval / --cap CLI args (GitHub controls cadence)
+  - No lock file (GitHub ensures single concurrent execution via concurrency groups)
+  - No internal sleep or loop — runs one scan, saves state, exits cleanly
+  - Full isolation from production: reads/writes only _test1m state files
+  - OKX execution handled inline (not via okx_executor.execute_signal) so the
+    isolated _test1m position file is the single source of truth for the cap,
+    with no cross-contamination from open_positions.json
 
-ISOLATION: Uses separate state files (suffixed _test1m) so this NEVER touches
-production state (open_positions.json, sent_signals.json) used by the real
-15m GitHub Actions workflow.
+STATE FILES (committed back to repo by the workflow after each run):
+  sent_signals_test1m.json    — dedup memory (same pattern as sent_signals.json)
+  open_positions_test1m.json  — isolated position tracker (cap enforcement)
 
-SAFETY: Hard concurrency cap enforced BEFORE execution, not after.
-
-USAGE (run locally, from the crypto_signals_bot folder, with env vars set):
-    python test_bot_1m.py
-    python test_bot_1m.py --cycles 30 --interval 60 --cap 3
+CONCURRENCY CAP: hard-coded at 3 (same as production intent).
 """
 
 import os
 import sys
 import json
-import time
-import argparse
 import urllib.request
 import urllib.parse
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
 
-# Force unbuffered, line-flushed stdout so live progress is visible
-# regardless of how this script is launched (background task, redirected
-# to a file, etc). Without this, output can sit invisible in a buffer
-# until the process exits.
 sys.stdout.reconfigure(line_buffering=True)
-
 sys.path.insert(0, str(Path(__file__).parent))
 
-# ─── Import REAL production modules — do not redefine detection logic ───────
 from data.fetcher import fetch_ohlcv, TOP_20
 from patterns.detector import detect_rsi_divergence
 
-# OKX executor is optional — script still runs (detect-only) if unavailable
 try:
-    from okx_executor import execute_signal as okx_execute_signal
-    OKX_MODULE_AVAILABLE = True
+    import ccxt
+    CCXT_AVAILABLE = True
 except ImportError:
-    OKX_MODULE_AVAILABLE = False
+    CCXT_AVAILABLE = False
 
 # ─── Configuration ────────────────────────────────────────────────────────────
 
 TOKEN   = os.environ.get("TELEGRAM_TOKEN")
 CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "8589721199")
 
-TF              = "1m"      # <-- the ONLY deliberate change from production
-DAYS            = 1         # 1m candles -> 1 day is plenty of history
-DEFAULT_CYCLES  = 30
-DEFAULT_INTERVAL = 60       # seconds between cycles
-DEFAULT_CAP     = 3         # hard concurrency cap — non-negotiable per today's incident
+TF                       = "1m"
+DAYS                     = 1
+MAX_CONCURRENT           = 3       # hard cap — never exceeded regardless of signals
+DETECTION_WINDOW_MINUTES = 10      # catch signals even if GitHub fired slightly late
 
-# Isolated state — NEVER shared with the production 15m bot
-STATE_DIR        = Path(__file__).parent
-SENT_FILE_TEST   = STATE_DIR / "sent_signals_test1m.json"
-POSITIONS_FILE   = STATE_DIR / "open_positions_test1m.json"
-LOG_FILE         = STATE_DIR / "test1m_run_log.json"
+OKX_API_KEY    = os.environ.get("OKX_API_KEY")
+OKX_SECRET_KEY = os.environ.get("OKX_SECRET_KEY")
+OKX_PASSPHRASE = os.environ.get("OKX_PASSPHRASE")
+OKX_ENABLED    = CCXT_AVAILABLE and all([OKX_API_KEY, OKX_SECRET_KEY, OKX_PASSPHRASE])
 
-OKX_ENABLED = OKX_MODULE_AVAILABLE and all([
-    os.environ.get("OKX_API_KEY"),
-    os.environ.get("OKX_SECRET_KEY"),
-    os.environ.get("OKX_PASSPHRASE"),
-])
+STATE_DIR      = Path(__file__).parent
+SENT_FILE      = STATE_DIR / "sent_signals_test1m.json"
+POSITIONS_FILE = STATE_DIR / "open_positions_test1m.json"
 
-
-# ─── Sanity guard ─────────────────────────────────────────────────────────────
-
-def assert_isolated_from_production():
-    """
-    Refuse to run if this script would touch production state files.
-    This is the one mistake that must never happen.
-    """
-    prod_files = ["sent_signals.json", "open_positions.json"]
-    for f in prod_files:
-        if Path(f).resolve() == SENT_FILE_TEST.resolve() or \
-           Path(f).resolve() == POSITIONS_FILE.resolve():
-            print(f"FATAL: state file collision with production file {f}. Aborting.")
-            sys.exit(1)
-    print("OK: isolated from production state files (sent_signals.json, open_positions.json).")
+# Minimum order sizes per symbol (OKX Demo requirements)
+MIN_AMOUNTS = {
+    "BTC/USDT": 0.001, "ETH/USDT": 0.01,  "BNB/USDT": 0.1,
+    "SOL/USDT": 0.1,   "XRP/USDT": 10.0,  "ADA/USDT": 10.0,
+    "DOGE/USDT": 100.0,"AVAX/USDT": 0.1,  "LINK/USDT": 0.1,
+    "TRX/USDT": 100.0, "default":   1.0,
+}
 
 
-LOCK_FILE = STATE_DIR / "test_bot_1m.lock"
+# ─── State helpers ────────────────────────────────────────────────────────────
 
-
-def acquire_lock_or_exit():
-    """
-    Refuse to start a second instance. This script's concurrency cap only
-    works correctly with a single writer to open_positions_test1m.json —
-    two instances racing each other can both pass the cap check before
-    either has saved its position, silently exceeding the cap.
-    """
-    if LOCK_FILE.exists():
-        try:
-            old_pid = int(LOCK_FILE.read_text().strip())
-        except Exception:
-            old_pid = None
-        print(f"FATAL: lock file exists ({LOCK_FILE.name}, pid={old_pid}).")
-        print("Another instance may already be running. If you're sure it is not,")
-        print(f"delete {LOCK_FILE} manually and re-run.")
-        sys.exit(1)
-    LOCK_FILE.write_text(str(os.getpid()))
-
-
-def release_lock():
-    LOCK_FILE.unlink(missing_ok=True)
-
-
-# ─── State (isolated) ─────────────────────────────────────────────────────────
-
-def load_json_set(path):
-    if not path.exists():
+def load_sent():
+    if not SENT_FILE.exists():
         return set()
     try:
-        return set(json.loads(path.read_text(encoding="utf-8")))
+        return set(json.loads(SENT_FILE.read_text(encoding="utf-8")))
     except Exception:
         return set()
 
 
-def save_json_set(path, data_set, max_items=500):
-    items = list(data_set)[-max_items:]
-    path.write_text(json.dumps(items, ensure_ascii=False, indent=2), encoding="utf-8")
+def save_sent(sent_set):
+    items = list(sent_set)[-500:]
+    SENT_FILE.write_text(json.dumps(items, ensure_ascii=False, indent=2),
+                         encoding="utf-8")
 
 
 def load_positions():
@@ -144,15 +95,17 @@ def load_positions():
 
 
 def save_positions(positions):
-    POSITIONS_FILE.write_text(json.dumps(positions, ensure_ascii=False, indent=2),
-                              encoding="utf-8")
+    POSITIONS_FILE.write_text(
+        json.dumps(positions, ensure_ascii=False, indent=2),
+        encoding="utf-8"
+    )
 
 
 def signal_key(symbol, direction, ts):
     return f"{symbol}|{direction}|{ts.strftime('%Y%m%d%H%M')}"
 
 
-# ─── Telegram ──────────────────────────────────────────────────────────────────
+# ─── Telegram ─────────────────────────────────────────────────────────────────
 
 def send_telegram(text):
     if not TOKEN:
@@ -171,30 +124,92 @@ def send_telegram(text):
 
 
 def fmt_price(price):
-    if price >= 1:
-        return f"{price:,.4f}"
-    elif price >= 0.01:
-        return f"{price:.6f}"
+    if price >= 1:      return f"{price:,.4f}"
+    elif price >= 0.01: return f"{price:.6f}"
     return f"{price:.8f}"
 
 
-# ─── Core cycle logic ──────────────────────────────────────────────────────────
+# ─── OKX (inline, isolated — does NOT call okx_executor.py) ──────────────────
 
-def count_open_positions():
-    return len(load_positions())
+def connect_okx():
+    return ccxt.okx({
+        "apiKey":   OKX_API_KEY,
+        "secret":   OKX_SECRET_KEY,
+        "password": OKX_PASSPHRASE,
+        "sandbox":  True,
+        "options":  {"defaultType": "swap"},
+    })
 
 
-DETECTION_WINDOW_MINUTES = 10  # widened from 1 to avoid missing signals if a
-                                 # cycle is delayed (cycles have drifted 60-150s
-                                 # in practice, not exactly 60s every time)
+def get_pos_mode(exchange):
+    try:
+        resp = exchange.private_get_account_config()
+        mode = resp.get("data", [{}])[0].get("posMode", "net_mode")
+        return "hedge" if mode == "long_short_mode" else "oneway"
+    except Exception:
+        return "oneway"
 
 
-def scan_one_cycle(symbols):
-    """Scan all symbols on 1m for signals in the last DETECTION_WINDOW_MINUTES."""
+def open_on_okx(symbol, direction, rsi):
+    """
+    Opens a Futures (Swap) position on OKX Demo.
+    Uses explicit swap_symbol construction — avoids the Spot routing bug.
+    Returns order_id or None.
+    """
+    try:
+        exchange   = connect_okx()
+        pos_mode   = get_pos_mode(exchange)
+        swap_symbol = symbol.replace("/", "-") + "-SWAP"   # explicit — never rely on ccxt defaultType mapping
+
+        # Set leverage to 1x (no leverage)
+        try:
+            exchange.set_leverage(1, swap_symbol, params={"mgnMode": "cross"})
+        except Exception:
+            pass  # may already be set
+
+        # Calculate size: 2% of USDT balance
+        balance    = float(exchange.fetch_balance()["total"].get("USDT", 0))
+        risk_usdt  = balance * 0.02
+        ticker     = exchange.fetch_ticker(symbol)
+        price      = ticker["last"]
+        amount     = max(round(risk_usdt / price, 4),
+                         MIN_AMOUNTS.get(symbol, MIN_AMOUNTS["default"]))
+
+        order_side = "buy" if direction == "long" else "sell"
+        params     = {"posSide": direction} if pos_mode == "hedge" else {}
+
+        order = exchange.create_order(
+            symbol=swap_symbol,    # explicit swap symbol
+            type="market",
+            side=order_side,
+            amount=amount,
+            params=params,
+        )
+        print(f"  OKX: opened {direction} {amount} {symbol} @ ~{fmt_price(price)} (swap)")
+        return order.get("id"), amount
+    except Exception as e:
+        print(f"  OKX error: {e}")
+        return None, None
+
+
+# ─── Main single-cycle logic ──────────────────────────────────────────────────
+
+def run():
     now    = datetime.now(timezone.utc)
     cutoff = now - timedelta(minutes=DETECTION_WINDOW_MINUTES)
-    found  = []
-    for symbol in symbols:
+
+    print(f"[TEST 1m] {now.strftime('%Y-%m-%d %H:%M:%S')} UTC | "
+          f"OKX: {'ON' if OKX_ENABLED else 'OFF'} | "
+          f"Window: {DETECTION_WINDOW_MINUTES}min")
+
+    sent_set  = load_sent()
+    positions = load_positions()
+    open_count = len(positions)
+    print(f"  Open positions: {open_count}/{MAX_CONCURRENT}")
+
+    executed_count = rejected_count = 0
+
+    for symbol in TOP_20[:10]:
         try:
             df = fetch_ohlcv(symbol, TF, days=DAYS, use_cache=False)
             if df.empty or len(df) < 60:
@@ -203,119 +218,63 @@ def scan_one_cycle(symbols):
             if signals.empty:
                 continue
             recent = signals[signals.index >= cutoff]
+
             for ts, sig in recent.iterrows():
-                found.append((symbol, sig, ts))
+                key = signal_key(symbol, sig["direction"], ts)
+                if key in sent_set:
+                    print(f"  ~ {symbol} {sig['direction']} — duplicate, skipped.")
+                    continue
+
+                # Reload positions immediately before cap check
+                # (protects against stale reads within the same cycle)
+                positions  = load_positions()
+                open_count = len(positions)
+
+                if open_count >= MAX_CONCURRENT:
+                    print(f"  X {symbol} {sig['direction']} — cap reached ({open_count}/{MAX_CONCURRENT}).")
+                    rejected_count += 1
+                    sent_set.add(key)
+                    continue
+
+                # Execute on OKX (inline, isolated)
+                order_id = amount = None
+                if OKX_ENABLED:
+                    order_id, amount = open_on_okx(symbol, sig["direction"], sig["rsi"])
+
+                # Save to ISOLATED position file — never touches open_positions.json
+                pos_key = f"{symbol}|{sig['direction']}"
+                positions[pos_key] = {
+                    "symbol":    symbol,
+                    "direction": sig["direction"],
+                    "entry":     sig["entry"],
+                    "stop":      sig["stop"],
+                    "target1":   sig["target1"],
+                    "amount":    amount,
+                    "order_id":  order_id,
+                    "opened_at": ts.isoformat(),
+                }
+                save_positions(positions)
+                sent_set.add(key)
+                executed_count += 1
+
+                status = "executed on OKX Swap" if order_id else "detect-only"
+                print(f"  + {symbol} {sig['direction']} @ {fmt_price(sig['entry'])} — {status}.")
+
+                send_telegram(
+                    f"🧪 <b>[TEST 1m] {status}</b>\n\n"
+                    f"Symbol: <b>{symbol}</b>\n"
+                    f"Direction: {sig['direction'].upper()}\n"
+                    f"Entry: {fmt_price(sig['entry'])}\n"
+                    f"RSI: {sig['rsi']}\n"
+                    f"Time: {ts.strftime('%H:%M UTC')}"
+                )
+
         except Exception as e:
-            print(f"    {symbol}: skipped ({e})")
-    return found
+            print(f"  {symbol}: skipped ({e})")
 
+    save_sent(sent_set)
+    print(f"  Done: {executed_count} executed, {rejected_count} rejected by cap.")
 
-def run_cycle(cycle_num, total_cycles, cap, sent_set, stats):
-    print(f"\n--- Cycle {cycle_num}/{total_cycles} | {datetime.now(timezone.utc).strftime('%H:%M:%S')} UTC ---")
-
-    open_count = count_open_positions()
-    print(f"  Open positions: {open_count}/{cap}")
-
-    signals = scan_one_cycle(TOP_20[:10])  # smaller universe — 1m scanning is heavier
-    if not signals:
-        print("  No signals this cycle.")
-        return
-
-    for symbol, sig, ts in signals:
-        key = signal_key(symbol, sig["direction"], ts)
-        if key in sent_set:
-            print(f"  ~ {symbol} {sig['direction']} — duplicate, skipped.")
-            continue
-
-        # HARD CAP — enforced BEFORE any execution, every single time
-        open_count = count_open_positions()
-        if open_count >= cap:
-            print(f"  X {symbol} {sig['direction']} — REJECTED, cap reached ({open_count}/{cap}).")
-            stats["rejected_cap"] += 1
-            sent_set.add(key)  # don't keep re-evaluating the same rejected signal
-            continue
-
-        executed = False
-        if OKX_ENABLED:
-            signal_dict = {
-                "symbol": symbol, "direction": sig["direction"],
-                "entry": sig["entry"], "stop": sig["stop"],
-                "target1": sig["target1"], "target2": sig.get("target2", sig["target1"]),
-                "rsi": sig["rsi"],
-            }
-            try:
-                executed = okx_execute_signal(signal_dict)
-            except Exception as e:
-                print(f"    OKX execution error: {e}")
-
-        # Track in ISOLATED position file regardless of OKX result,
-        # so the cap logic works even in detect-only mode.
-        positions = load_positions()
-        positions[f"{symbol}|{sig['direction']}"] = {
-            "symbol": symbol, "direction": sig["direction"],
-            "entry": sig["entry"], "opened_at": ts.isoformat(),
-        }
-        save_positions(positions)
-
-        status = "executed on OKX" if executed else ("detect-only" if not OKX_ENABLED else "OKX exec failed")
-        msg = (
-            f"🧪 <b>[TEST 1m] Signal — {status}</b>\n\n"
-            f"Symbol: <b>{symbol}</b>\n"
-            f"Direction: {sig['direction'].upper()}\n"
-            f"Entry: {fmt_price(sig['entry'])}\n"
-            f"RSI: {sig['rsi']}\n"
-            f"Cycle: {cycle_num}/{total_cycles}"
-        )
-        send_telegram(msg)
-
-        sent_set.add(key)
-        stats["executed"] += 1
-        print(f"  + {symbol} {sig['direction']} @ {fmt_price(sig['entry'])} — {status}.")
-
-
-# ─── Main ──────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--cycles",   type=int, default=DEFAULT_CYCLES)
-    ap.add_argument("--interval", type=int, default=DEFAULT_INTERVAL, help="seconds between cycles")
-    ap.add_argument("--cap",      type=int, default=DEFAULT_CAP)
-    args = ap.parse_args()
-
-    assert_isolated_from_production()
-    acquire_lock_or_exit()
-
-    print("=" * 60)
-    print("  TEST BOT — 1m timeframe, REAL detection logic")
-    print(f"  Cycles: {args.cycles} | Interval: {args.interval}s | Cap: {args.cap}")
-    print(f"  OKX execution: {'ENABLED' if OKX_ENABLED else 'disabled (detect-only)'}")
-    print("=" * 60)
-
-    sent_set = load_json_set(SENT_FILE_TEST)
-    stats    = {"executed": 0, "rejected_cap": 0}
-
-    try:
-        for i in range(1, args.cycles + 1):
-            run_cycle(i, args.cycles, args.cap, sent_set, stats)
-            save_json_set(SENT_FILE_TEST, sent_set)
-            if i < args.cycles:
-                time.sleep(args.interval)
-    except KeyboardInterrupt:
-        print("\nStopped manually.")
-    finally:
-        release_lock()
-
-    print("\n" + "=" * 60)
-    print("  RUN SUMMARY")
-    print(f"  Signals executed/notified : {stats['executed']}")
-    print(f"  Signals rejected by cap   : {stats['rejected_cap']}")
-    print(f"  Final open positions      : {count_open_positions()}/{args.cap}")
-    print("=" * 60)
-
-    summary = {
-        "finished_at": datetime.now(timezone.utc).isoformat(),
-        "cycles": args.cycles, "interval": args.interval, "cap": args.cap,
-        **stats,
-    }
-    LOG_FILE.write_text(json.dumps(summary, indent=2), encoding="utf-8")
-    print(f"\nSummary saved to {LOG_FILE.name}")
+    run()
