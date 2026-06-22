@@ -270,7 +270,9 @@ def run():
                 )
 
         except Exception as e:
+            import traceback
             print(f"  {symbol}: skipped ({e})")
+            traceback.print_exc()
 
     save_sent(sent_set)
     print(f"  Done: {executed_count} executed, {rejected_count} rejected by cap.")
