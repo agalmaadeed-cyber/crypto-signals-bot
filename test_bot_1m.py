@@ -61,7 +61,7 @@ POSITIONS_FILE = STATE_DIR / "open_positions_test1m.json"
 
 # Minimum order sizes per symbol (OKX Demo requirements)
 MIN_AMOUNTS = {
-    "BTC/USDT": 0.001, "ETH/USDT": 0.01,  "BNB/USDT": 0.1,
+    "BTC/USDT": 0.001, "ETH/USDT": 0.01,  "BNB/USDT": 1.0,
     "SOL/USDT": 0.1,   "XRP/USDT": 10.0,  "ADA/USDT": 10.0,
     "DOGE/USDT": 100.0,"AVAX/USDT": 0.1,  "LINK/USDT": 0.1,
     "TRX/USDT": 100.0, "default":   1.0,
