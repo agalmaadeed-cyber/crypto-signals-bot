@@ -1,0 +1,24 @@
+# render.yaml — Render deployment configuration
+# Background Worker: runs bot_runner.py as a continuous 24/7 process
+
+services:
+  - type: worker
+    name: crypto-signals-bot
+    runtime: python
+    repo: https://github.com/agalmaadeed-cyber/crypto-signals-bot
+    branch: main
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bot_runner.py
+    envVars:
+      - key: TELEGRAM_TOKEN
+        sync: false        # set manually in Render dashboard
+      - key: OKX_API_KEY
+        sync: false
+      - key: OKX_SECRET_KEY
+        sync: false
+      - key: OKX_PASSPHRASE
+        sync: false
+      - key: GITHUB_TOKEN
+        sync: false
+      - key: GITHUB_REPO
+        value: agalmaadeed-cyber/crypto-signals-bot
