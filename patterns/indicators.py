@@ -26,12 +26,11 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     # ── VWAP اليومي ──────────────────────────────────────────────────
     df["typical_price"] = (df["high"] + df["low"] + df["close"]) / 3
     df["date"] = df.index.date
-    df["cum_tp_vol"] = df.groupby("date", group_keys=False).apply(
-        lambda g: (g["typical_price"] * g["volume"]).cumsum()
-    )
-    df["cum_vol"] = df.groupby("date")["volume"].cumsum()
+    df["tp_vol"]     = df["typical_price"] * df["volume"]
+    df["cum_tp_vol"] = df.groupby("date")["tp_vol"].transform("cumsum")
+    df["cum_vol"]    = df.groupby("date")["volume"].transform("cumsum")
     df["vwap"] = df["cum_tp_vol"] / df["cum_vol"].replace(0, np.nan)
-    df.drop(columns=["typical_price", "cum_tp_vol", "cum_vol", "date"], inplace=True)
+    df.drop(columns=["typical_price", "tp_vol", "cum_tp_vol", "cum_vol", "date"], inplace=True)
 
     # ── ATR ──────────────────────────────────────────────────────────
     high_low = df["high"] - df["low"]
